@@ -1,0 +1,42 @@
+
+SINGLE-CELL RNA-SEQ MALIGNANT CELL CLASSIFICATION REPORT
+========================================================
+
+Dataset Information:
+- Total cells analyzed: 138,727
+- Total genes: 2,920
+- Number of clusters identified: 50
+
+Malignancy Classification Results:
+- Malignant cells identified: 60,425 (43.56%)
+- Non-malignant cells: 78,302 (56.44%)
+
+Cell Type Annotations:
+- Unknown: 70,039 cells (50.49%)
+- Unknown (Potentially Malignant): 22,157 cells (15.97%)
+- Epithelial cell (Stress/Proliferative - Potentially Malignant): 13,110 cells (9.45%)
+- T cell (Potentially Malignant): 9,877 cells (7.12%)
+- Immune cell (Macrophage/Dendritic) (Potentially Malignant): 9,873 cells (7.12%)
+- Epithelial cell: 8,263 cells (5.96%)
+- Fibroblast (Potentially Malignant): 5,408 cells (3.90%)
+
+Key Findings:
+1. High proportion of potentially malignant cells (43.56%) suggests this is likely a cancer dataset
+2. Major cell populations include:
+   - Epithelial cells with stress/proliferative markers (potentially malignant)
+   - T cells (some with malignancy markers)
+   - Immune cells (macrophages/dendritic cells)
+   - Fibroblasts
+3. Cancer-associated genes detected in multiple clusters
+
+Methodology:
+- Quality control and preprocessing performed
+- Leiden clustering (resolution=0.5) identified 50 clusters
+- Cell type annotation based on marker gene expression
+- Malignancy prediction based on:
+  * Expression of COSMIC cancer genes
+  * Stress/proliferation markers (DDIT4, HMGB2, NUPR1, STC2)
+  * Metabolic stress indicators
+  
+Output Files:
+- malignant_cell_classification_results.csv: Complete cell-level results

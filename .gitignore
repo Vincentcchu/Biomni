@@ -217,3 +217,25 @@ data/ddinter_raw/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+-e 
+# Large directories
+data/
+run5/
+run6/
+run7/
+sarcoma1/
+malignant_classification_analysis/
+*.csv
+run_cluster/
+run_dormancy/
+run_dormancy_definition/
+run_dormancy_definition2/
+run_dormancy_w_malignancy/
+
+-e 
+# Data files
+*.h5ad
+*.h5
+*.npz
+*.npy
+
