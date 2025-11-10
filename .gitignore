@@ -239,3 +239,4 @@ run_dormancy_w_malignancy/
 *.npz
 *.npy
 
+config.json
