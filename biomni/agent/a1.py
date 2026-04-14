@@ -1,7 +1,9 @@
 import glob
 import inspect
+import json
 import os
 import re
+import time
 from collections.abc import Generator
 from datetime import datetime
 from pathlib import Path
@@ -53,7 +55,21 @@ class AgentState(TypedDict):
     next_step: str | None
 
 
+class _LLMStageProxy:
+    """Small proxy that preserves llm.invoke interface while tagging usage stage."""
+
+    def __init__(self, agent: "A1", stage: str):
+        self._agent = agent
+        self._stage = stage
+
+    def invoke(self, messages):
+        return self._agent._invoke_llm(messages, stage=self._stage)
+
+
 class A1:
+    INPUT_COST_PER_MILLION = 3.0
+    OUTPUT_COST_PER_MILLION = 15.0
+
     def __init__(
         self,
         path: str | None = None,
@@ -202,6 +218,7 @@ class A1:
             api_key=api_key,
             config=default_config,
         )
+        self._last_run_metrics = None
         self.module2api = module2api
         self.use_tool_retriever = use_tool_retriever
 
@@ -221,6 +238,140 @@ class A1:
         # Add timeout parameter
         self.timeout_seconds = timeout_seconds  # 10 minutes default timeout
         self.configure()
+
+    @property
+    def last_run_metrics(self) -> dict | None:
+        """Return metrics from the most recent agent run."""
+        return self._last_run_metrics
+
+    def get_last_run_metrics(self) -> dict | None:
+        """Return metrics from the most recent agent run."""
+        return self._last_run_metrics
+
+    def save_last_run_json(self, file_path: str, include_log: bool = True) -> str:
+        """Save the most recent run result and metrics to a JSON file.
+
+        Args:
+            file_path: Destination path for JSON output.
+            include_log: If True, include the full execution log.
+
+        Returns:
+            Absolute path to the saved JSON file.
+        """
+        has_metrics = self._last_run_metrics is not None
+        has_answer = hasattr(self, "_last_run_answer")
+
+        if not has_metrics and not has_answer:
+            raise ValueError("No run results available. Execute agent.go(...) or agent.go_stream(...) first.")
+
+        payload = {
+            "saved_at": datetime.now().isoformat(),
+            "answer": getattr(self, "_last_run_answer", None),
+            "metrics": self._last_run_metrics,
+        }
+
+        if include_log:
+            payload["log"] = getattr(self, "_last_run_log", list(getattr(self, "log", [])))
+
+        output_path = Path(file_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        return str(output_path.resolve())
+
+    def _build_empty_run_metrics(self, prompt: str) -> dict:
+        model_name = getattr(self.llm, "model_name", None) or getattr(self.llm, "model", None)
+        return {
+            "prompt": prompt,
+            "model": str(model_name) if model_name else None,
+            "started_at": datetime.now().isoformat(),
+            "completed_at": None,
+            "timing_seconds": {
+                "preprocessing": 0.0,
+                "annotation": 0.0,
+                "total": 0.0,
+            },
+            "token_usage": {
+                "preprocessing": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "annotation": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "total": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            },
+            "cost_usd": {
+                "input": 0.0,
+                "output": 0.0,
+                "total": 0.0,
+            },
+            "llm_calls": 0,
+        }
+
+    def _safe_int(self, value: Any) -> int:
+        try:
+            if value is None:
+                return 0
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _extract_usage(self, response: Any) -> dict[str, int]:
+        """Extract token usage from LangChain response objects across providers."""
+        input_tokens = 0
+        output_tokens = 0
+        total_tokens = 0
+
+        usage_metadata = getattr(response, "usage_metadata", None)
+        if isinstance(usage_metadata, dict):
+            input_tokens += self._safe_int(usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens"))
+            output_tokens += self._safe_int(
+                usage_metadata.get("output_tokens") or usage_metadata.get("completion_tokens")
+            )
+            total_tokens += self._safe_int(usage_metadata.get("total_tokens"))
+
+        response_metadata = getattr(response, "response_metadata", None)
+        if isinstance(response_metadata, dict):
+            usage = response_metadata.get("usage") or response_metadata.get("token_usage")
+            if isinstance(usage, dict):
+                input_tokens += self._safe_int(usage.get("input_tokens") or usage.get("prompt_tokens"))
+                output_tokens += self._safe_int(usage.get("output_tokens") or usage.get("completion_tokens"))
+                total_tokens += self._safe_int(usage.get("total_tokens"))
+
+        if total_tokens == 0:
+            total_tokens = input_tokens + output_tokens
+
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    def _recompute_cost(self) -> None:
+        if not self._last_run_metrics:
+            return
+        totals = self._last_run_metrics["token_usage"]["total"]
+        input_cost = (totals["input_tokens"] / 1_000_000) * self.INPUT_COST_PER_MILLION
+        output_cost = (totals["output_tokens"] / 1_000_000) * self.OUTPUT_COST_PER_MILLION
+        self._last_run_metrics["cost_usd"]["input"] = input_cost
+        self._last_run_metrics["cost_usd"]["output"] = output_cost
+        self._last_run_metrics["cost_usd"]["total"] = input_cost + output_cost
+
+    def _record_llm_usage(self, response: Any, stage: str) -> None:
+        if not self._last_run_metrics:
+            return
+        usage = self._extract_usage(response)
+        stage_bucket = self._last_run_metrics["token_usage"].get(stage)
+        if stage_bucket is None:
+            return
+        for key in ("input_tokens", "output_tokens", "total_tokens"):
+            stage_bucket[key] += usage[key]
+            self._last_run_metrics["token_usage"]["total"][key] += usage[key]
+        self._last_run_metrics["llm_calls"] += 1
+        self._recompute_cost()
+
+    def _invoke_llm(self, messages: list[BaseMessage], stage: str = "annotation"):
+        response = self.llm.invoke(messages)
+        self._record_llm_usage(response, stage=stage)
+        return response
+
+    def _get_llm_stage_proxy(self, stage: str) -> _LLMStageProxy:
+        return _LLMStageProxy(self, stage)
 
     def add_tool(self, api):
         """Add a new tool to the agent's tool registry and make it available for retrieval.
@@ -1387,7 +1538,7 @@ Each library is listed with its description to help you understand its functiona
                 system_prompt += "\n\nIMPORTANT FOR GPT MODELS: You MUST use XML tags <execute> or <solution> in EVERY response. Do not use markdown code blocks (```) - use <execute> tags instead."
 
             messages = [SystemMessage(content=system_prompt)] + state["messages"]
-            response = self.llm.invoke(messages)
+            response = self._invoke_llm(messages, stage="annotation")
 
             # Normalize Responses API content blocks (list of dicts) into a plain string
             content = response.content
@@ -1588,7 +1739,7 @@ Each library is listed with its description to help you understand its functiona
                 Think hard what are missing to solve the task.
                 No question asked, just feedbacks.
                 """
-                feedback = self.llm.invoke(messages + [HumanMessage(content=feedback_prompt)])
+                feedback = self._invoke_llm(messages + [HumanMessage(content=feedback_prompt)], stage="annotation")
 
                 # Add feedback as a new message
                 state["messages"].append(
@@ -1699,7 +1850,11 @@ Each library is listed with its description to help you understand its functiona
         }
 
         # Use prompt-based retrieval with the agent's LLM
-        selected_resources = self.retriever.prompt_based_retrieval(prompt, resources, llm=self.llm)
+        selected_resources = self.retriever.prompt_based_retrieval(
+            prompt,
+            resources,
+            llm=self._get_llm_stage_proxy("preprocessing"),
+        )
         print("\n" + "=" * 60)
         print("🔍 RESOURCE RETRIEVAL")
         print("=" * 60)
@@ -1763,12 +1918,17 @@ Each library is listed with its description to help you understand its functiona
             prompt: The user's query
 
         """
+        run_start = time.perf_counter()
+        self._last_run_metrics = self._build_empty_run_metrics(prompt)
+
         self.critic_count = 0
         self.user_task = prompt
 
+        preprocessing_start = time.perf_counter()
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
             self.update_system_prompt_with_selected_resources(selected_resources_names)
+        self._last_run_metrics["timing_seconds"]["preprocessing"] = time.perf_counter() - preprocessing_start
 
         inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
         config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
@@ -1777,14 +1937,22 @@ Each library is listed with its description to help you understand its functiona
         # Store the final conversation state for markdown generation
         final_state = None
 
+        annotation_start = time.perf_counter()
         for s in self.app.stream(inputs, stream_mode="values", config=config):
             message = s["messages"][-1]
             out = pretty_print(message)
             self.log.append(out)
             final_state = s  # Store the latest state
+        self._last_run_metrics["timing_seconds"]["annotation"] = time.perf_counter() - annotation_start
 
         # Store the conversation state for markdown generation
         self._conversation_state = final_state
+
+        self._last_run_metrics["timing_seconds"]["total"] = time.perf_counter() - run_start
+        self._last_run_metrics["completed_at"] = datetime.now().isoformat()
+
+        self._last_run_answer = message.content
+        self._last_run_log = list(self.log)
 
         return self.log, message.content
 
@@ -1800,12 +1968,17 @@ Each library is listed with its description to help you understand its functiona
         Yields:
             dict: Each step of the agent's execution containing the current message and state
         """
+        run_start = time.perf_counter()
+        self._last_run_metrics = self._build_empty_run_metrics(prompt)
+
         self.critic_count = 0
         self.user_task = prompt
 
+        preprocessing_start = time.perf_counter()
         if self.use_tool_retriever:
             selected_resources_names = self._prepare_resources_for_retrieval(prompt)
             self.update_system_prompt_with_selected_resources(selected_resources_names)
+        self._last_run_metrics["timing_seconds"]["preprocessing"] = time.perf_counter() - preprocessing_start
 
         inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
         config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
@@ -1813,9 +1986,12 @@ Each library is listed with its description to help you understand its functiona
 
         # Store the final conversation state for markdown generation
         final_state = None
+        last_message_content = None
 
+        annotation_start = time.perf_counter()
         for s in self.app.stream(inputs, stream_mode="values", config=config):
             message = s["messages"][-1]
+            last_message_content = message.content
             out = pretty_print(message)
             self.log.append(out)
             final_state = s  # Store the latest state
@@ -1823,8 +1999,14 @@ Each library is listed with its description to help you understand its functiona
             # Yield the current step
             yield {"output": out}
 
+        self._last_run_metrics["timing_seconds"]["annotation"] = time.perf_counter() - annotation_start
+
         # Store the conversation state for markdown generation
         self._conversation_state = final_state
+        self._last_run_metrics["timing_seconds"]["total"] = time.perf_counter() - run_start
+        self._last_run_metrics["completed_at"] = datetime.now().isoformat()
+        self._last_run_answer = last_message_content
+        self._last_run_log = list(self.log)
 
     def update_system_prompt_with_selected_resources(self, selected_resources):
         """Update the system prompt with the selected resources."""
