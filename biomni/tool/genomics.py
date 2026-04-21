@@ -466,7 +466,7 @@ def annotate_celltype_scRNA(
     data_info,
     data_lake_path,
     cluster="leiden",
-    llm="claude-3-5-sonnet-20241022",
+    llm="claude-sonnet-4-5", #"claude-3-5-sonnet-20241022",
     composition=None,
 ):
     """Annotate cell types based on gene markers and transferred labels using LLM.
@@ -646,9 +646,22 @@ def annotate_celltype_with_panhumanpy(
     def create_panhumanpy_env(env_name):
         # Create env and install panhumanpy
         subprocess.run(["conda", "create", "-y", "-n", env_name, "python=3.10"], check=True)
-        # Install panhumanpy in the new env
+        # Install panhumanpy and the runtime dependencies used by the temp script.
         subprocess.run(
-            ["conda", "run", "-n", env_name, "pip", "install", "git+https://github.com/satijalab/panhumanpy.git"],
+            [
+                "conda",
+                "run",
+                "-n",
+                env_name,
+                "python",
+                "-m",
+                "pip",
+                "install",
+                "git+https://github.com/satijalab/panhumanpy.git",
+                "numpy",
+                "pandas",
+                "scanpy",
+            ],
             check=True,
         )
 
@@ -771,9 +784,17 @@ except Exception as e:
     # 3. Run the script in the panhumanpy_env
     try:
         run_cmd = ["conda", "run", "-n", PANHUMANPY_ENV, "python", script_path]
-        subprocess.run(run_cmd, check=True)
+        subprocess.run(run_cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
+        details = []
+        if e.stdout:
+            details.append(f"stdout:\n{e.stdout}")
+        if e.stderr:
+            details.append(f"stderr:\n{e.stderr}")
+        detail_text = "\n\n".join(details)
         shutil.rmtree(temp_dir)
+        if detail_text:
+            return f"Error running panhumanpy in conda env: {e}\n\n{detail_text}"
         return f"Error running panhumanpy in conda env: {e}"
 
     # 4. Read the result

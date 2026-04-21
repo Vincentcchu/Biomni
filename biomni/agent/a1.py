@@ -22,6 +22,7 @@ from biomni.llm import SourceType, get_llm
 from biomni.model.retriever import ToolRetriever
 from biomni.tool.support_tools import run_python_repl
 from biomni.tool.tool_registry import ToolRegistry
+from biomni.usage_tracking import activate_usage_collector
 from biomni.utils import (
     check_and_download_s3_files,
     clean_message_content,
@@ -217,6 +218,7 @@ class A1:
             base_url=base_url,
             api_key=api_key,
             config=default_config,
+            enable_usage_callbacks=False,
         )
         self._last_run_metrics = None
         self.module2api = module2api
@@ -312,28 +314,38 @@ class A1:
             return 0
 
     def _extract_usage(self, response: Any) -> dict[str, int]:
-        """Extract token usage from LangChain response objects across providers."""
+        """Extract token usage from LangChain response objects across providers.
+        
+        Uses single-source extraction to avoid double-counting:
+        - Prefer usage_metadata, fall back to response_metadata.usage
+        - Never extract from both sources for the same response
+        """
         input_tokens = 0
         output_tokens = 0
         total_tokens = 0
 
+        # Try primary source: usage_metadata
         usage_metadata = getattr(response, "usage_metadata", None)
         if isinstance(usage_metadata, dict):
-            input_tokens += self._safe_int(usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens"))
-            output_tokens += self._safe_int(
+            input_tokens = self._safe_int(usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens"))
+            output_tokens = self._safe_int(
                 usage_metadata.get("output_tokens") or usage_metadata.get("completion_tokens")
             )
-            total_tokens += self._safe_int(usage_metadata.get("total_tokens"))
+            total_tokens = self._safe_int(usage_metadata.get("total_tokens"))
+        else:
+            # Fallback to secondary source: response_metadata.usage
+            response_metadata = getattr(response, "response_metadata", None)
+            if isinstance(response_metadata, dict):
+                usage = response_metadata.get("usage") or response_metadata.get("token_usage")
+                if isinstance(usage, dict):
+                    input_tokens = self._safe_int(usage.get("input_tokens") or usage.get("prompt_tokens"))
+                    output_tokens = self._safe_int(usage.get("output_tokens") or usage.get("completion_tokens"))
+                    total_tokens = self._safe_int(usage.get("total_tokens"))
 
-        response_metadata = getattr(response, "response_metadata", None)
-        if isinstance(response_metadata, dict):
-            usage = response_metadata.get("usage") or response_metadata.get("token_usage")
-            if isinstance(usage, dict):
-                input_tokens += self._safe_int(usage.get("input_tokens") or usage.get("prompt_tokens"))
-                output_tokens += self._safe_int(usage.get("output_tokens") or usage.get("completion_tokens"))
-                total_tokens += self._safe_int(usage.get("total_tokens"))
-
+        # Consistency check: ensure total is at least input + output
         if total_tokens == 0:
+            total_tokens = input_tokens + output_tokens
+        elif total_tokens < (input_tokens + output_tokens):
             total_tokens = input_tokens + output_tokens
 
         return {
@@ -356,6 +368,11 @@ class A1:
         if not self._last_run_metrics:
             return
         usage = self._extract_usage(response)
+        self._record_usage(usage, stage=stage)
+
+    def _record_usage(self, usage: dict[str, int], stage: str) -> None:
+        if not self._last_run_metrics:
+            return
         stage_bucket = self._last_run_metrics["token_usage"].get(stage)
         if stage_bucket is None:
             return
@@ -364,6 +381,16 @@ class A1:
             self._last_run_metrics["token_usage"]["total"][key] += usage[key]
         self._last_run_metrics["llm_calls"] += 1
         self._recompute_cost()
+
+    def record_usage_from_callback(
+        self,
+        usage: dict[str, int],
+        stage: str = "annotation",
+        source: str = "callback",
+    ) -> None:
+        """Record usage from callback-instrumented llm instances (e.g., tool-local get_llm calls)."""
+        _ = source  # Reserved for future per-source reporting.
+        self._record_usage(usage, stage=stage)
 
     def _invoke_llm(self, messages: list[BaseMessage], stage: str = "annotation"):
         response = self.llm.invoke(messages)
@@ -1921,38 +1948,39 @@ Each library is listed with its description to help you understand its functiona
         run_start = time.perf_counter()
         self._last_run_metrics = self._build_empty_run_metrics(prompt)
 
-        self.critic_count = 0
-        self.user_task = prompt
+        with activate_usage_collector(self):
+            self.critic_count = 0
+            self.user_task = prompt
 
-        preprocessing_start = time.perf_counter()
-        if self.use_tool_retriever:
-            selected_resources_names = self._prepare_resources_for_retrieval(prompt)
-            self.update_system_prompt_with_selected_resources(selected_resources_names)
-        self._last_run_metrics["timing_seconds"]["preprocessing"] = time.perf_counter() - preprocessing_start
+            preprocessing_start = time.perf_counter()
+            if self.use_tool_retriever:
+                selected_resources_names = self._prepare_resources_for_retrieval(prompt)
+                self.update_system_prompt_with_selected_resources(selected_resources_names)
+            self._last_run_metrics["timing_seconds"]["preprocessing"] = time.perf_counter() - preprocessing_start
 
-        inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
-        config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
-        self.log = []
+            inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
+            config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
+            self.log = []
 
-        # Store the final conversation state for markdown generation
-        final_state = None
+            # Store the final conversation state for markdown generation
+            final_state = None
 
-        annotation_start = time.perf_counter()
-        for s in self.app.stream(inputs, stream_mode="values", config=config):
-            message = s["messages"][-1]
-            out = pretty_print(message)
-            self.log.append(out)
-            final_state = s  # Store the latest state
-        self._last_run_metrics["timing_seconds"]["annotation"] = time.perf_counter() - annotation_start
+            annotation_start = time.perf_counter()
+            for s in self.app.stream(inputs, stream_mode="values", config=config):
+                message = s["messages"][-1]
+                out = pretty_print(message)
+                self.log.append(out)
+                final_state = s  # Store the latest state
+            self._last_run_metrics["timing_seconds"]["annotation"] = time.perf_counter() - annotation_start
 
-        # Store the conversation state for markdown generation
-        self._conversation_state = final_state
+            # Store the conversation state for markdown generation
+            self._conversation_state = final_state
 
-        self._last_run_metrics["timing_seconds"]["total"] = time.perf_counter() - run_start
-        self._last_run_metrics["completed_at"] = datetime.now().isoformat()
+            self._last_run_metrics["timing_seconds"]["total"] = time.perf_counter() - run_start
+            self._last_run_metrics["completed_at"] = datetime.now().isoformat()
 
-        self._last_run_answer = message.content
-        self._last_run_log = list(self.log)
+            self._last_run_answer = message.content
+            self._last_run_log = list(self.log)
 
         return self.log, message.content
 
@@ -1971,42 +1999,43 @@ Each library is listed with its description to help you understand its functiona
         run_start = time.perf_counter()
         self._last_run_metrics = self._build_empty_run_metrics(prompt)
 
-        self.critic_count = 0
-        self.user_task = prompt
+        with activate_usage_collector(self):
+            self.critic_count = 0
+            self.user_task = prompt
 
-        preprocessing_start = time.perf_counter()
-        if self.use_tool_retriever:
-            selected_resources_names = self._prepare_resources_for_retrieval(prompt)
-            self.update_system_prompt_with_selected_resources(selected_resources_names)
-        self._last_run_metrics["timing_seconds"]["preprocessing"] = time.perf_counter() - preprocessing_start
+            preprocessing_start = time.perf_counter()
+            if self.use_tool_retriever:
+                selected_resources_names = self._prepare_resources_for_retrieval(prompt)
+                self.update_system_prompt_with_selected_resources(selected_resources_names)
+            self._last_run_metrics["timing_seconds"]["preprocessing"] = time.perf_counter() - preprocessing_start
 
-        inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
-        config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
-        self.log = []
+            inputs = {"messages": [HumanMessage(content=prompt)], "next_step": None}
+            config = {"recursion_limit": 500, "configurable": {"thread_id": 42}}
+            self.log = []
 
-        # Store the final conversation state for markdown generation
-        final_state = None
-        last_message_content = None
+            # Store the final conversation state for markdown generation
+            final_state = None
+            last_message_content = None
 
-        annotation_start = time.perf_counter()
-        for s in self.app.stream(inputs, stream_mode="values", config=config):
-            message = s["messages"][-1]
-            last_message_content = message.content
-            out = pretty_print(message)
-            self.log.append(out)
-            final_state = s  # Store the latest state
+            annotation_start = time.perf_counter()
+            for s in self.app.stream(inputs, stream_mode="values", config=config):
+                message = s["messages"][-1]
+                last_message_content = message.content
+                out = pretty_print(message)
+                self.log.append(out)
+                final_state = s  # Store the latest state
 
-            # Yield the current step
-            yield {"output": out}
+                # Yield the current step
+                yield {"output": out}
 
-        self._last_run_metrics["timing_seconds"]["annotation"] = time.perf_counter() - annotation_start
+            self._last_run_metrics["timing_seconds"]["annotation"] = time.perf_counter() - annotation_start
 
-        # Store the conversation state for markdown generation
-        self._conversation_state = final_state
-        self._last_run_metrics["timing_seconds"]["total"] = time.perf_counter() - run_start
-        self._last_run_metrics["completed_at"] = datetime.now().isoformat()
-        self._last_run_answer = last_message_content
-        self._last_run_log = list(self.log)
+            # Store the conversation state for markdown generation
+            self._conversation_state = final_state
+            self._last_run_metrics["timing_seconds"]["total"] = time.perf_counter() - run_start
+            self._last_run_metrics["completed_at"] = datetime.now().isoformat()
+            self._last_run_answer = last_message_content
+            self._last_run_log = list(self.log)
 
     def update_system_prompt_with_selected_resources(self, selected_resources):
         """Update the system prompt with the selected resources."""

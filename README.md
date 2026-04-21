@@ -294,7 +294,7 @@ from biomni.config import default_config
 from biomni.agent import A1
 
 # Database queries (indexes, retrieval, etc.) use default_config
-default_config.llm = "claude-3-5-sonnet-20241022"
+default_config.llm = "claude-sonnet-4-5"
 default_config.source = "Anthropic"
 
 # Agent reasoning uses Biomni-R0 served via SGLang (OpenAI-compatible API)

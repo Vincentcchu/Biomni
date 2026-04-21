@@ -18,6 +18,7 @@ def get_llm(
     base_url: str | None = None,
     api_key: str | None = None,
     config: Optional["BiomniConfig"] = None,
+    enable_usage_callbacks: bool = True,
 ) -> BaseChatModel:
     """
     Get a language model instance based on the specified model name and source.
@@ -47,7 +48,7 @@ def get_llm(
 
     # Use defaults if still not specified
     if model is None:
-        model = "claude-3-5-sonnet-20241022"
+        model = "claude-sonnet-4-5"
     if temperature is None:
         temperature = 0.7
     if api_key is None:
@@ -94,6 +95,16 @@ def get_llm(
             else:
                 raise ValueError("Unable to determine model source. Please specify 'source' parameter.")
 
+    callback_kwargs = {}
+    if enable_usage_callbacks:
+        try:
+            from biomni.usage_tracking import UsageTrackingCallback, get_active_usage_collector
+
+            if get_active_usage_collector() is not None:
+                callback_kwargs = {"callbacks": [UsageTrackingCallback()]}
+        except Exception:
+            callback_kwargs = {}
+
     # Create appropriate model based on source
     if source == "OpenAI":
         try:
@@ -131,12 +142,14 @@ def get_llm(
                 stop_sequences=stop_sequences,
                 use_responses_api=True,
                 output_version="v0",
+                **callback_kwargs,
             )
         else:
             return ChatOpenAI(
                 model=model,
                 temperature=temperature,
                 stop_sequences=stop_sequences,
+                **callback_kwargs,
             )
 
     elif source == "AzureOpenAI":
@@ -154,6 +167,7 @@ def get_llm(
             azure_deployment=model,
             openai_api_version=API_VERSION,
             temperature=temperature,
+            **callback_kwargs,
         )
 
     elif source == "Anthropic":
@@ -186,6 +200,7 @@ def get_llm(
             temperature=temperature,
             max_tokens=8192,
             stop_sequences=stop_sequences,
+            **callback_kwargs,
         )
 
     elif source == "Gemini":
@@ -207,6 +222,7 @@ def get_llm(
             api_key=os.getenv("GEMINI_API_KEY"),
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             stop_sequences=stop_sequences,
+            **callback_kwargs,
         )
 
     elif source == "Groq":
@@ -222,6 +238,7 @@ def get_llm(
             api_key=os.getenv("GROQ_API_KEY"),
             base_url="https://api.groq.com/openai/v1",
             stop_sequences=stop_sequences,
+            **callback_kwargs,
         )
 
     elif source == "Ollama":
@@ -234,6 +251,7 @@ def get_llm(
         return ChatOllama(
             model=model,
             temperature=temperature,
+            **callback_kwargs,
         )
 
     elif source == "Bedrock":
@@ -248,6 +266,7 @@ def get_llm(
             temperature=temperature,
             stop_sequences=stop_sequences,
             region_name=os.getenv("AWS_REGION", "us-east-1"),
+            **callback_kwargs,
         )
 
     elif source == "Custom":
@@ -266,6 +285,7 @@ def get_llm(
             stop_sequences=stop_sequences,
             base_url=base_url,
             api_key=api_key,
+            **callback_kwargs,
         )
         return llm
 

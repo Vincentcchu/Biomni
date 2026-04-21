@@ -320,7 +320,7 @@ def write_python_code(request: str):
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.prompts import ChatPromptTemplate
 
-    model = ChatAnthropic(model="claude-3-5-sonnet-20240620")
+    model = ChatAnthropic(model="claude-sonnet-4-5")
     template = """Write some python code to solve the user's problem.
 
     Return only python code in Markdown format, e.g.:

@@ -31,7 +31,7 @@ ANTHROPIC_API_KEY=your_key
 OPENAI_API_KEY=your_key
 
 # Optional Settings
-BIOMNI_LLM=claude-3-5-sonnet-20241022
+BIOMNI_LLM=claude-sonnet-4-5
 BIOMNI_TIMEOUT_SECONDS=1200
 BIOMNI_PATH=/path/to/data
 ```
@@ -50,7 +50,7 @@ default_config.timeout_seconds = 1200
 
 ```python
 # ⚠️ Only affects this agent's reasoning, NOT database queries
-agent = A1(llm="claude-3-5-sonnet-20241022")
+agent = A1(llm="claude-sonnet-4-5")
 ```
 
 ## Common Examples
@@ -70,7 +70,7 @@ agent = A1()
 default_config.llm = "claude-3-5-haiku-20241022"
 
 # More powerful model for agent reasoning
-agent = A1(llm="claude-3-5-sonnet-20241022")
+agent = A1(llm="claude-sonnet-4-5")
 ```
 
 ### Custom/Local Models

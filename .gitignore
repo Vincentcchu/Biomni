@@ -232,3 +232,4 @@ data/ddinter_raw/
 # Sphinx build
 /docs/build/
 /docs/source/api/
+claude_api_key.json
