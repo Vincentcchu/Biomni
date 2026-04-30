@@ -30,7 +30,8 @@ DEFAULT_AGENT_DATA_PATH = "./data"
 DEFAULT_ANTHROPIC_KEY_JSON = Path("./claude_api_key.json")
 
 PROMPT_TEMPLATE = (
-    "Perform cell type annotation on the {tissue} cancer scRNA-seq dataset at {h5ad_path}, using the clustering information in adata.obs[\"cluster\"]."
+    "Perform cell type annotation on the {tissue} cancer scRNA-seq dataset at {h5ad_path}. "
+    "Clustering information is available in adata.obs['cluster']. "
     "Save the results to {output_csv_path} as a CSV."
 )
 
@@ -88,6 +89,22 @@ def find_h5ad_files(data_dir: Path, h5ad_subdir: str, tissues: list[str] | None)
             targets.append((tissue, h5ad))
 
     return targets
+
+
+def filter_h5ad_files_by_dataset(targets: list[tuple[str, Path]], dataset: str | None) -> list[tuple[str, Path]]:
+    if not dataset:
+        return targets
+
+    query = dataset.strip()
+    query_stem = Path(query).stem
+
+    filtered = [
+        (tissue, h5ad_path)
+        for tissue, h5ad_path in targets
+        if h5ad_path.name == query or h5ad_path.stem == query or h5ad_path.stem == query_stem
+    ]
+
+    return filtered
 
 
 def build_output_run_dir(output_dir: Path, tissue: str, h5ad_path: Path) -> Path:
@@ -229,6 +246,11 @@ def main() -> None:
     parser.add_argument("--h5ad-subdir", default=DEFAULT_H5AD_SUBDIR, help="Per-tissue subdir containing .h5ad files")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Output directory for JSON files")
     parser.add_argument("--tissues", nargs="+", default=None, help="Optional subset of tissues")
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help="Run only one dataset by .h5ad filename or stem (e.g. sample.h5ad or sample)",
+    )
     parser.add_argument("--llm", default=DEFAULT_MODEL, help="LLM model name for Biomni")
     parser.add_argument("--agent-data-path", default=DEFAULT_AGENT_DATA_PATH, help="Biomni data path")
     parser.add_argument(
@@ -258,11 +280,24 @@ def main() -> None:
     args = parser.parse_args()
 
     all_files = find_h5ad_files(args.data_dir, args.h5ad_subdir, args.tissues)
+    all_files = filter_h5ad_files_by_dataset(all_files, args.dataset)
     if not all_files:
-        print("No .h5ad files found for the given filters.")
+        if args.dataset:
+            print(
+                "No .h5ad files found for the given filters and dataset "
+                f"'{args.dataset}'."
+            )
+        else:
+            print("No .h5ad files found for the given filters.")
         return
 
-    print(f"Found {len(all_files)} file(s) under {args.data_dir} using subdir '{args.h5ad_subdir}'.")
+    if args.dataset:
+        print(
+            f"Found {len(all_files)} file(s) under {args.data_dir} using subdir '{args.h5ad_subdir}' "
+            f"for dataset '{args.dataset}'."
+        )
+    else:
+        print(f"Found {len(all_files)} file(s) under {args.data_dir} using subdir '{args.h5ad_subdir}'.")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -399,6 +434,9 @@ if __name__ == "__main__":
 # python run_all_tissues.py --tissues brain breast colorectal
 # Use clustered inputs:
 # python run_all_tissues.py --h5ad-subdir h5ad_unlabelled_clustered
+# Run a single dataset (by filename or stem):
+# python run_all_tissues.py --dataset sample_01
+# python run_all_tissues.py --dataset sample_01.h5ad
 # Skip files already processed:
 # python run_all_tissues.py --skip-existing
 # Custom output directory:
